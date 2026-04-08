@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { initDatabase, getOrCreateUser, replaceHoldings, isMessageProcessed, markMessageProcessed, closeDatabase } from './db.js';
-import { listMessages, AgentMailMessage } from './agentmail.js';
+import { listMessages, getMessage, extractEmail, extractName, AgentMailMessage } from './agentmail.js';
 import { parseHoldings } from './parser.js';
 import { sendConfirmation, sendParseError } from './reports.js';
 import { startScheduler } from './scheduler.js';
@@ -12,17 +12,20 @@ const POLLING_INTERVAL = parseInt(process.env.AGENTMAIL_POLLING_INTERVAL_MS || '
 let running = true;
 
 async function processMessage(msg: AgentMailMessage): Promise<void> {
-  const senderEmail = msg.from_;
+  const senderEmail = extractEmail(msg.from);
   if (!senderEmail) {
-    log(`Message ${msg.id} has no sender, skipping`);
+    log(`Message ${msg.message_id} has no parseable sender, skipping`);
     return;
   }
 
+  const senderName = extractName(msg.from);
   log(`Processing email from ${senderEmail}: "${msg.subject}"`);
 
-  const body = msg.text || msg.html || '';
+  // Fetch full message to get body text
+  const fullMsg = await getMessage(msg.message_id);
+  const body = fullMsg.text || fullMsg.html || fullMsg.preview || '';
   if (!body.trim()) {
-    log(`Message ${msg.id} has no body, skipping`);
+    log(`Message ${msg.message_id} has no body, skipping`);
     return;
   }
 
@@ -35,7 +38,7 @@ async function processMessage(msg: AgentMailMessage): Promise<void> {
       return;
     }
 
-    const user = getOrCreateUser(senderEmail);
+    const user = getOrCreateUser(senderEmail, senderName || undefined);
     replaceHoldings(user.id, holdings);
 
     log(`Updated holdings for ${senderEmail}: ${holdings.map(h => `${h.ticker}:${h.shares}`).join(', ')}`);
@@ -56,16 +59,20 @@ async function pollMessages(): Promise<void> {
     const messages = await listMessages();
 
     for (const msg of messages) {
-      if (isMessageProcessed(msg.id)) continue;
+      if (isMessageProcessed(msg.message_id)) continue;
 
-      // Skip messages sent by ourselves
-      if (msg.from_ === 'holdings@agentmail.to') {
-        markMessageProcessed(msg.id);
+      // Skip messages sent by ourselves (label "sent" or from our inbox)
+      const senderEmail = extractEmail(msg.from);
+      if (
+        senderEmail === 'holdings@agentmail.to' ||
+        (msg.labels && msg.labels.includes('sent'))
+      ) {
+        markMessageProcessed(msg.message_id);
         continue;
       }
 
       await processMessage(msg);
-      markMessageProcessed(msg.id);
+      markMessageProcessed(msg.message_id);
     }
   } catch (err) {
     log(`Polling error: ${err}`);
