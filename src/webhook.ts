@@ -1,7 +1,7 @@
 import express from 'express';
 import { Webhook } from 'svix';
 import { isMessageProcessed, markMessageProcessed, getOrCreateUser, replaceHoldings } from './db.js';
-import { extractEmail, extractName } from './agentmail.js';
+import { extractEmail, extractName, getMessage } from './agentmail.js';
 import { parseHoldings } from './parser.js';
 import { sendConfirmation, sendParseError } from './reports.js';
 
@@ -53,12 +53,24 @@ async function handleIncomingMessage(payload: WebhookMessagePayload): Promise<vo
   const senderName = extractName(msg.from);
   log(`Processing email from ${senderEmail}: "${msg.subject}"`);
 
-  const body = msg.text || msg.html || msg.preview || '';
+  // Webhook payload may not include full text — fetch full message if needed
+  let body = msg.text || msg.html || '';
+  if (!body.trim()) {
+    log(`Webhook payload missing text, fetching full message ${msg.message_id}`);
+    try {
+      const fullMsg = await getMessage(msg.message_id);
+      body = (fullMsg as any).text || (fullMsg as any).html || msg.preview || '';
+    } catch (fetchErr) {
+      log(`Failed to fetch full message: ${fetchErr}, using preview`);
+      body = msg.preview || '';
+    }
+  }
   if (!body.trim()) {
     log(`Message ${msg.message_id} has no body, skipping`);
     markMessageProcessed(msg.message_id);
     return;
   }
+  log(`Email body: "${body.substring(0, 200)}"`);
 
   try {
     const holdings = await parseHoldings(body);
