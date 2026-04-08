@@ -38,9 +38,9 @@ async function handleIncomingMessage(payload: WebhookMessagePayload): Promise<vo
     return;
   }
 
-  // Skip our own outbound messages
+  // Skip our own outbound messages and other agentmail bots
   const senderEmail = extractEmail(msg.from);
-  if (!senderEmail || senderEmail === 'holdings@agentmail.to') {
+  if (!senderEmail || senderEmail.endsWith('@agentmail.to')) {
     markMessageProcessed(msg.message_id);
     return;
   }
