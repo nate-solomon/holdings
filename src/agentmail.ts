@@ -94,6 +94,65 @@ export function extractName(fromField: string): string | null {
   return null;
 }
 
+interface WebhookResponse {
+  webhook_id: string;
+  secret: string;
+  url: string;
+  event_types: string[];
+  enabled: boolean;
+}
+
+interface ListWebhooksResponse {
+  webhooks: WebhookResponse[];
+}
+
+/** Register a webhook for message.received events, or update existing one */
+export async function registerWebhook(url: string): Promise<string> {
+  // Check for existing webhooks first to avoid duplicates
+  const listRes = await fetch(`${BASE_URL}/webhooks`, { headers: headers() });
+  if (listRes.ok) {
+    const data = (await listRes.json()) as ListWebhooksResponse;
+    const existing = data.webhooks?.find(
+      w => w.url === url && w.event_types.includes('message.received')
+    );
+    if (existing) {
+      log(`Webhook already registered: ${existing.webhook_id}`);
+      return existing.secret;
+    }
+
+    // Delete stale webhooks pointing to different URLs
+    for (const w of data.webhooks || []) {
+      if (w.event_types.includes('message.received') && w.url !== url) {
+        log(`Deleting stale webhook ${w.webhook_id} (${w.url})`);
+        await fetch(`${BASE_URL}/webhooks/${w.webhook_id}`, {
+          method: 'DELETE',
+          headers: headers(),
+        });
+      }
+    }
+  }
+
+  // Create new webhook
+  const res = await fetch(`${BASE_URL}/webhooks`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({
+      url,
+      event_types: ['message.received'],
+      inbox_ids: [INBOX_ID],
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to create webhook (${res.status}): ${text}`);
+  }
+
+  const webhook = (await res.json()) as WebhookResponse;
+  log(`Webhook created: ${webhook.webhook_id}`);
+  return webhook.secret;
+}
+
 function log(msg: string): void {
   console.log(`[${new Date().toISOString()}] [AgentMail] ${msg}`);
 }

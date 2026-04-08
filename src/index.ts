@@ -1,105 +1,14 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import { initDatabase, getOrCreateUser, replaceHoldings, isMessageProcessed, markMessageProcessed, closeDatabase } from './db.js';
-import { listMessages, getMessage, extractEmail, extractName, AgentMailMessage } from './agentmail.js';
-import { parseHoldings } from './parser.js';
-import { sendConfirmation, sendParseError } from './reports.js';
+import { initDatabase, closeDatabase } from './db.js';
 import { startScheduler } from './scheduler.js';
-
-const POLLING_INTERVAL = parseInt(process.env.AGENTMAIL_POLLING_INTERVAL_MS || '30000', 10);
-
-let running = true;
-
-async function processMessage(msg: AgentMailMessage): Promise<void> {
-  const senderEmail = extractEmail(msg.from);
-  if (!senderEmail) {
-    log(`Message ${msg.message_id} has no parseable sender, skipping`);
-    return;
-  }
-
-  const senderName = extractName(msg.from);
-  log(`Processing email from ${senderEmail}: "${msg.subject}"`);
-
-  // Fetch full message to get body text
-  const fullMsg = await getMessage(msg.message_id);
-  const body = fullMsg.text || fullMsg.html || fullMsg.preview || '';
-  if (!body.trim()) {
-    log(`Message ${msg.message_id} has no body, skipping`);
-    return;
-  }
-
-  try {
-    const holdings = await parseHoldings(body);
-
-    if (holdings.length === 0) {
-      log(`No holdings parsed from ${senderEmail}'s email`);
-      await sendParseError(senderEmail);
-      return;
-    }
-
-    const user = getOrCreateUser(senderEmail, senderName || undefined);
-    replaceHoldings(user.id, holdings);
-
-    log(`Updated holdings for ${senderEmail}: ${holdings.map(h => `${h.ticker}:${h.shares}`).join(', ')}`);
-
-    await sendConfirmation(senderEmail, holdings);
-  } catch (err) {
-    log(`Error processing message from ${senderEmail}: ${err}`);
-    try {
-      await sendParseError(senderEmail);
-    } catch (sendErr) {
-      log(`Failed to send error reply: ${sendErr}`);
-    }
-  }
-}
-
-async function pollMessages(): Promise<void> {
-  try {
-    const messages = await listMessages();
-
-    for (const msg of messages) {
-      if (isMessageProcessed(msg.message_id)) continue;
-
-      // Skip messages sent by ourselves (label "sent" or from our inbox)
-      const senderEmail = extractEmail(msg.from);
-      if (
-        senderEmail === 'holdings@agentmail.to' ||
-        (msg.labels && msg.labels.includes('sent'))
-      ) {
-        markMessageProcessed(msg.message_id);
-        continue;
-      }
-
-      await processMessage(msg);
-      markMessageProcessed(msg.message_id);
-    }
-  } catch (err) {
-    log(`Polling error: ${err}`);
-  }
-}
-
-async function startPolling(): Promise<void> {
-  log(`Polling every ${POLLING_INTERVAL / 1000}s`);
-
-  while (running) {
-    await pollMessages();
-    await sleep(POLLING_INTERVAL);
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function log(msg: string): void {
-  console.log(`[${new Date().toISOString()}] [Main] ${msg}`);
-}
+import { startWebhookServer, setWebhookSecret } from './webhook.js';
+import { registerWebhook } from './agentmail.js';
 
 // Graceful shutdown
 function shutdown(): void {
   log('Shutting down...');
-  running = false;
   closeDatabase();
   process.exit(0);
 }
@@ -107,7 +16,10 @@ function shutdown(): void {
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
-// Start
+function log(msg: string): void {
+  console.log(`[${new Date().toISOString()}] [Main] ${msg}`);
+}
+
 async function main(): Promise<void> {
   initDatabase();
   log('Portfolio tracker started');
@@ -121,8 +33,30 @@ async function main(): Promise<void> {
   log(`Current time in ET: ${etTime}`);
   log('Next reports scheduled at 10:00 AM ET and 6:00 PM ET');
 
+  // Start HTTP server for webhooks
+  await startWebhookServer();
+
+  // Register webhook with AgentMail
+  const publicUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : process.env.PUBLIC_URL;
+
+  if (publicUrl) {
+    try {
+      const secret = await registerWebhook(`${publicUrl}/webhook`);
+      setWebhookSecret(secret);
+      log(`Webhook registered: ${publicUrl}/webhook`);
+    } catch (err) {
+      log(`Failed to register webhook: ${err}`);
+      log('Emails will not be processed until webhook is registered');
+    }
+  } else {
+    log('WARNING: No PUBLIC_URL or RAILWAY_PUBLIC_DOMAIN set — webhook not registered');
+    log('Set PUBLIC_URL env var to your Railway public URL');
+  }
+
+  // Start cron jobs for scheduled reports
   startScheduler();
-  await startPolling();
 }
 
 main().catch(err => {
