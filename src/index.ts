@@ -36,23 +36,27 @@ async function main(): Promise<void> {
   // Start HTTP server for webhooks
   await startWebhookServer();
 
-  // Register webhook with AgentMail
-  const publicUrl = process.env.RAILWAY_PUBLIC_DOMAIN
-    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-    : process.env.PUBLIC_URL;
-
-  if (publicUrl) {
-    try {
-      const secret = await registerWebhook(`${publicUrl}/webhook`);
-      setWebhookSecret(secret);
-      log(`Webhook registered: ${publicUrl}/webhook`);
-    } catch (err) {
-      log(`Failed to register webhook: ${err}`);
-      log('Emails will not be processed until webhook is registered');
-    }
+  // Set webhook secret for signature verification
+  if (process.env.WEBHOOK_SECRET) {
+    setWebhookSecret(process.env.WEBHOOK_SECRET);
+    log('Webhook secret loaded from env');
   } else {
-    log('WARNING: No PUBLIC_URL or RAILWAY_PUBLIC_DOMAIN set — webhook not registered');
-    log('Set PUBLIC_URL env var to your Railway public URL');
+    // Try to register webhook automatically
+    const publicUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+      ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+      : process.env.PUBLIC_URL;
+
+    if (publicUrl) {
+      try {
+        const secret = await registerWebhook(`${publicUrl}/webhook`);
+        setWebhookSecret(secret);
+        log(`Webhook registered: ${publicUrl}/webhook`);
+      } catch (err) {
+        log(`Failed to register webhook: ${err}`);
+      }
+    } else {
+      log('WARNING: No WEBHOOK_SECRET or PUBLIC_URL set — webhook signature verification disabled');
+    }
   }
 
   // Start cron jobs for scheduled reports
